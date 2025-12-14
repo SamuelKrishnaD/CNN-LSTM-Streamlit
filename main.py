@@ -6,45 +6,31 @@ import matplotlib.pyplot as plt
 from keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 import plotly.graph_objects as go
-import base64
 import time
+import requests
 
-# ----------------------------
-# Helpers: background images
-# ----------------------------
-def get_base64(image_path):
-    with open(image_path, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode()
+st.set_page_config(page_title="MarketSense", layout="wide")
 
-image_base64 = get_base64("adds/stonk.jpg")
-page_bg_color = f"""
+# =========================
+# UI STYLING (keep your first UI)
+# =========================
+st.title('Stock Market Prediction')
+
+date_input_style = """
 <style>
-[data-testid="stAppViewContainer"] {{
-    background-image: url("data:image/jpeg;base64,{image_base64}");
-    background-size: cover;
-    background-position: center;
-    background-repeat: no-repeat;
-}}
+[data-testid="stSidebar"] [data-testid="stDateInput"] input {
+    background-color: #1E1E1E;
+    color: white;
+    border-radius: 8px;
+    padding: 8px;
+    border: 1px solid #555;
+}
 </style>
 """
-st.markdown(page_bg_color, unsafe_allow_html=True)
+st.markdown(date_input_style, unsafe_allow_html=True)
 
-sidebar_base64 = get_base64('adds/stonk_sidebar.png')
-sidebar_bg_image = f"""
+text_input_style = """
 <style>
-[data-testid="stSidebar"] {{
-    background-image: url("data:image/jpeg;base64,{sidebar_base64}");
-    background-size: cover;
-    background-position: center;
-}}
-</style>
-"""
-st.markdown(sidebar_bg_image, unsafe_allow_html=True)
-
-# Sidebar input styling
-st.markdown("""
-<style>
-[data-testid="stSidebar"] [data-testid="stDateInput"] input,
 [data-testid="stSidebar"] [data-testid="stTextInput"] input {
     background-color: #1E1E1E;
     color: white;
@@ -52,6 +38,12 @@ st.markdown("""
     padding: 8px;
     border: 1px solid #555;
 }
+</style>
+"""
+st.markdown(text_input_style, unsafe_allow_html=True)
+
+selectbox_style = """
+<style>
 [data-testid="stSidebar"] [data-testid="stSelectbox"] {
     background-color: #1E1E1E;
     color: white;
@@ -63,19 +55,19 @@ st.markdown("""
     color: white !important;
 }
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(selectbox_style, unsafe_allow_html=True)
 
-st.title('Stock Market Prediction')
 
-# ----------------------------
-# Robust yfinance download
-# ----------------------------
+# =========================
+# Robust yfinance wrapper
+# =========================
 @st.cache_data(ttl=60 * 10, show_spinner=False)
 def yf_download_safe(ticker: str, start=None, end=None, period=None, interval="1d"):
     """
-    Safer wrapper:
-    - threads=False (important on Streamlit Cloud)
-    - retries with small backoff
+    Safer wrapper for yfinance on Streamlit Cloud:
+    - threads=False
+    - retries + backoff
     - normalize MultiIndex columns
     """
     last_err = None
@@ -89,18 +81,19 @@ def yf_download_safe(ticker: str, start=None, end=None, period=None, interval="1
                 interval=interval,
                 auto_adjust=False,
                 progress=False,
-                threads=False,
+                threads=False,   # IMPORTANT on Streamlit Cloud
             )
+
             if df is None or df.empty:
-                raise ValueError("Empty dataframe returned")
+                raise ValueError("Empty dataframe returned from yfinance")
 
             df = df.reset_index()
 
-            # Some returns have MultiIndex columns like ('Close','BBCA.JK')
+            # If MultiIndex columns appear, flatten
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.droplevel(1)
 
-            # Ensure Date exists
+            # Normalize Date column name
             if "Date" not in df.columns and "Datetime" in df.columns:
                 df = df.rename(columns={"Datetime": "Date"})
 
@@ -112,9 +105,10 @@ def yf_download_safe(ticker: str, start=None, end=None, period=None, interval="1
 
     raise RuntimeError(f"yfinance failed after retries: {last_err}")
 
-# ----------------------------
-# Inputs
-# ----------------------------
+
+# =========================
+# Sidebar Inputs (same as yours)
+# =========================
 ticker = st.sidebar.text_input('Code Saham', 'BBCA.JK')
 start_date = st.sidebar.date_input('Start Date')
 end_date = st.sidebar.date_input('End Date')
@@ -136,23 +130,24 @@ if years < 5:
     st.warning("Untuk hasil yang lebih baik, rentang waktu harus minimal 5 tahun")
     st.stop()
 
-# ----------------------------
-# Download + show data
-# ----------------------------
+
+# =========================
+# 1) Download main data
+# =========================
 try:
     data = yf_download_safe(ticker, start=start_date, end=end_date, interval="1d")
 except Exception as e:
-    st.error("Gagal download data dari Yahoo Finance (yfinance). Ini bisa terjadi kalau Yahoo memblokir server Streamlit Cloud.")
+    st.error("Gagal download data dari Yahoo Finance. Ini bisa terjadi kalau Yahoo memblokir Streamlit Cloud.")
     st.exception(e)
-    st.info("Coba: ganti ticker (misal AAPL), coba lagi beberapa menit, atau pakai Twelve Data untuk stabil.")
     st.stop()
 
+# Display data
 st.subheader(f'Stock Data From {start_date} To {end_date}')
 st.write(data)
 
-# ----------------------------
-# MA charts
-# ----------------------------
+# =========================
+# 2) MA Charts
+# =========================
 st.subheader('Closing Price vs Time Chart with 100MA')
 ma100 = data['Close'].rolling(100).mean()
 fig = plt.figure(figsize=(12, 6))
@@ -172,14 +167,14 @@ plt.title(f'{ticker} Closing Price, 100-Day and 200-Day MAs')
 plt.legend(loc='best')
 st.pyplot(fig)
 
-# ----------------------------
-# Candlestick
-# ----------------------------
+# =========================
+# 3) Candlestick
+# =========================
 st.subheader(f'Candlestick Chart ({selected_period})')
 try:
     data_candle = yf_download_safe(ticker, period=period_options[selected_period], interval="1d")
 except Exception as e:
-    st.error("Gagal ambil candlestick data dari yfinance.")
+    st.error("Gagal ambil candlestick dari Yahoo Finance.")
     st.exception(e)
     st.stop()
 
@@ -203,11 +198,11 @@ fig_candle.update_layout(
 )
 st.plotly_chart(fig_candle, use_container_width=True)
 
-# ----------------------------
-# Train/Test split
-# ----------------------------
+# =========================
+# 4) Train/Test preparation (your logic)
+# =========================
 train_data = pd.DataFrame(data['Close'][0:int(len(data) * 0.7)])
-test_data  = pd.DataFrame(data['Close'][int(len(data) * 0.7):])
+test_data = pd.DataFrame(data['Close'][int(len(data) * 0.7):])
 
 scaler = MinMaxScaler(feature_range=(0, 1))
 train_data_array = scaler.fit_transform(train_data)
@@ -218,18 +213,16 @@ for i in range(100, train_data_array.shape[0]):
     y_train.append(train_data_array[i, 0])
 x_train, y_train = np.array(x_train), np.array(y_train)
 
-# ----------------------------
-# Load model once
-# ----------------------------
+# =========================
+# 5) Load model (cache)
+# =========================
 @st.cache_resource
 def load_cached_model(path: str):
     return load_model(path)
 
 model = load_cached_model('adds/Final_Model.h5')
 
-# ----------------------------
-# Test prep
-# ----------------------------
+# Build test set
 past_100_days = train_data.tail(100)
 final_df = pd.concat([past_100_days, test_data], ignore_index=True)
 input_data = scaler.fit_transform(final_df)
@@ -244,9 +237,9 @@ y_pred = model.predict(x_test, verbose=0)
 y_pred = scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
 y_test = scaler.inverse_transform(np.array(y_test).reshape(-1, 1)).flatten()
 
-# ----------------------------
-# Prediction vs Original
-# ----------------------------
+# =========================
+# 6) Prediction vs Original
+# =========================
 st.subheader('Prediction VS Original')
 fig2 = plt.figure(figsize=(12, 6))
 plt.plot(y_test, label='Original Price')
@@ -256,9 +249,9 @@ plt.ylabel('Price')
 plt.legend()
 st.pyplot(fig2)
 
-# ----------------------------
-# Forward N-day prediction
-# ----------------------------
+# =========================
+# 7) Forward prediction N days (your logic)
+# =========================
 st.subheader('Prediction Result : ')
 try:
     data2 = yf_download_safe(ticker, period='100d', interval='1d')
@@ -267,7 +260,6 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# Keep only Close
 train_data2 = pd.DataFrame(data2['Close'])
 scaler2 = MinMaxScaler(feature_range=(0, 1))
 train_data2_scaled = scaler2.fit_transform(train_data2).reshape(1, 100, 1)
@@ -278,14 +270,14 @@ temp_pred = []
 for i in range(n):
     y_next = model.predict(train_data2_scaled[:, i:train_data2_scaled.shape[1], :], verbose=0)
     train_data2_scaled = np.concatenate((train_data2_scaled, y_next.reshape(1, 1, 1)), axis=1)
-    temp_pred.append(scaler2.inverse_transform(y_next).reshape(-1)[0])
+    temp_pred.append(float(scaler2.inverse_transform(y_next).reshape(-1)[0]))
 
 temp_pred2 = pd.DataFrame(temp_pred, columns=['Predicted Price'])
 temp_pred2.index = range(0, n)
 temp_pred2.index.name = 'Hari'
 st.write(temp_pred2)
 
-# Plot last 7d + prediction
+# plot last 7 days + predictions
 try:
     temp_data1 = yf_download_safe(ticker, period='7d', interval='1d')
 except Exception as e:
@@ -295,20 +287,20 @@ except Exception as e:
 
 temp_close = temp_data1['Close'].to_numpy().reshape(-1, 1)
 pred_arr = np.array(temp_pred).reshape(-1, 1)
-fusion = np.vstack((temp_close, pred_arr))
+fussion_data = np.vstack((temp_close, pred_arr))
 
 st.subheader('Stock Price with Predictions')
 fig, ax = plt.subplots(figsize=(12, 6))
-ax.plot(fusion, label='Stock Price & Prediction')
+ax.plot(fussion_data, label='Stock Price & Prediction')
 ax.axvline(x=len(temp_close), linestyle='dashed', label='Prediction Start')
 ax.set_xlabel('Time')
 ax.set_ylabel('Price')
 ax.legend()
 st.pyplot(fig)
 
-# ----------------------------
-# DP max profit
-# ----------------------------
+# =========================
+# 8) DP max profit (your logic)
+# =========================
 def max_profit_dp(prices: list, k: int):
     n = len(prices)
     dp = {}
@@ -336,7 +328,8 @@ def max_profit_dp(prices: list, k: int):
     return result[0], result[1]
 
 predicted_prices = temp_pred2['Predicted Price'].tolist()
-profit, strategy_path = max_profit_dp(predicted_prices, 100)
+max_transaksi = 100
+profit, strategy_path = max_profit_dp(predicted_prices, max_transaksi)
 
 st.subheader("Maximal Profit Strategy")
 st.markdown(
@@ -349,23 +342,24 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ----------------------------
-# Webhook (as-is)
-# ----------------------------
-import requests
+# =========================
+# 9) Webhook (your logic)
+# =========================
 payload = {
     "ticker": ticker,
     "start_date": str(start_date),
     "end_date": str(end_date),
     "predicted_prices": temp_pred2['Predicted Price'].tolist()
 }
-webhook_url = "https://nominally-picked-grubworm.ngrok-free.app/webhook/stockanalysis"
 
+webhook_url = "https://nominally-picked-grubworm.ngrok-free.app/webhook/stockanalysis"
 st.subheader("Stock Market Analysis")
+
 try:
     response = requests.post(webhook_url, json=payload, timeout=30)
     if response.status_code == 200:
         st.success("Data berhasil dikirim!")
+
         import base64
         from io import BytesIO
         from PIL import Image
