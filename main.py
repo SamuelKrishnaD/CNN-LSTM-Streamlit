@@ -38,20 +38,20 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Twelve Data API fetch
+# Twelve Data API fetch - AUTO DATE RANGE
 # =========================
 @st.cache_data(ttl=600)
-def fetch_twelve_data(ticker: str, start, end) -> pd.DataFrame:
+def fetch_twelve_data(ticker: str, days_back: int = 1825) -> pd.DataFrame:
     """
     Fetch OHLC data from Twelve Data API
+    Automatically fetches last N days of data
     """
     try:
         # Remove .JK suffix for Indonesian stocks
         symbol = ticker.replace(".JK", "")
         
         # Calculate outputsize (max 5000)
-        days_diff = (end - start).days
-        outputsize = min(days_diff + 10, 5000)
+        outputsize = min(days_back + 30, 5000)
         
         # API endpoint
         url = "https://api.twelvedata.com/time_series"
@@ -61,9 +61,7 @@ def fetch_twelve_data(ticker: str, start, end) -> pd.DataFrame:
             "interval": "1day",
             "apikey": TWELVE_DATA_API_KEY,
             "outputsize": outputsize,
-            "format": "JSON",
-            "start_date": start.strftime("%Y-%m-%d"),
-            "end_date": end.strftime("%Y-%m-%d")
+            "format": "JSON"
         }
         
         response = requests.get(url, params=params, timeout=10)
@@ -104,6 +102,26 @@ def fetch_twelve_data(ticker: str, start, end) -> pd.DataFrame:
         return pd.DataFrame({"__error__": ["Request timeout. Please try again."]})
     except Exception as e:
         return pd.DataFrame({"__error__": [f"Error: {str(e)[:200]}"]})
+
+# =========================
+# Currency Detection
+# =========================
+def detect_currency(ticker: str) -> tuple:
+    """
+    Detect if ticker is Indonesian (IDR) or US (USD)
+    Returns: (currency_symbol, currency_code)
+    """
+    # Indonesian stock tickers (common ones)
+    indonesian_tickers = ['BBCA', 'BBRI', 'BBNI', 'BMRI', 'TLKM', 'ASII', 'UNVR', 
+                          'ICBP', 'INDF', 'KLBF', 'GGRM', 'HMSP', 'SMGR', 'JSMR',
+                          'PTBA', 'ADRO', 'ITMG', 'ANTM', 'INCO', 'EXCL', 'GOTO']
+    
+    ticker_clean = ticker.upper().replace(".JK", "")
+    
+    if ticker_clean in indonesian_tickers:
+        return ("Rp", "IDR")
+    else:
+        return ("$", "USD")
 
 # =========================
 # ATR
@@ -274,6 +292,7 @@ def plot_forecast_like_screenshot(
     atr_last: float,
     atr_mult: float,
     horizon: int,
+    currency_symbol: str = "$",
 ):
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"])
@@ -361,7 +380,7 @@ def plot_forecast_like_screenshot(
     fig.update_layout(
         title=f"📈 Forecast {ticker.upper()}: {horizon} Days Ahead",
         xaxis_title="Tanggal",
-        yaxis_title="Harga (USD)",
+        yaxis_title=f"Harga ({currency_symbol})",
         height=600,
         template="plotly_dark",
         margin=dict(l=10, r=10, t=60, b=10),
@@ -377,7 +396,7 @@ def plot_forecast_like_screenshot(
     st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# UI
+# UI - SIMPLIFIED (No Date Inputs)
 # =========================
 st.title("📊 MarketSense")
 st.markdown("🚀 **AI-Powered Stock Forecast** | Powered by Twelve Data API")
@@ -398,7 +417,7 @@ with st.expander("📋 Supported Tickers & Examples"):
         """)
     with col2:
         st.markdown("""
-        **🇮🇩 Indonesian Stocks:**
+        **🇮🇩 Indonesian Stocks (IDR):**
         - `BBCA` - Bank BCA
         - `BBRI` - Bank BRI
         - `TLKM` - Telkom Indonesia
@@ -408,25 +427,16 @@ with st.expander("📋 Supported Tickers & Examples"):
         💡 *No .JK suffix needed*
         """)
 
-c1, c2, c3 = st.columns([2.2, 1.2, 1.2])
+# Simple 3-input form
+c1, c2, c3 = st.columns(3)
 with c1:
-    nama_saham = st.text_input("Ticker Saham", placeholder="contoh: AAPL, BBCA, MSFT")
+    nama_saham = st.text_input("📌 Ticker Saham", placeholder="contoh: AAPL, BBCA")
 with c2:
-    strategi = st.selectbox("Strategi Risk", ("Conservative", "Moderate", "Aggressive"))
+    strategi = st.selectbox("🛡️ Strategi Risk", ("Conservative", "Moderate", "Aggressive"))
 with c3:
-    horizon_label = st.selectbox("Horizon", ("5 hari kedepan", "10 hari kedepan"))
+    horizon_label = st.selectbox("🎯 Horizon", ("5 hari kedepan", "10 hari kedepan"))
 
-# Smart defaults: 1 year of data
-default_end = datetime.now().date()
-default_start = default_end - timedelta(days=365)
-
-d1, d2 = st.columns(2)
-with d1:
-    start_date = st.date_input("Start Date", value=default_start)
-with d2:
-    end_date = st.date_input("End Date", value=default_end)
-
-st.info("💡 **Tip:** Gunakan minimal 1 tahun data untuk hasil prediksi optimal")
+st.info("💡 **Auto-fetch:** Sistem akan otomatis mengambil 1 tahun data historis terbaru")
 
 if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True):
     ticker = (nama_saham or "").strip()
@@ -434,32 +444,26 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
         st.error("❌ Ticker saham belum diisi.")
         st.stop()
 
-    if start_date >= end_date:
-        st.error("❌ Start Date harus lebih kecil dari End Date.")
-        st.stop()
-    
-    # Check minimum date range
-    days_diff = (end_date - start_date).days
-    if days_diff < 180:
-        st.warning("⚠️ Rentang waktu terlalu pendek. Minimal 6 bulan untuk hasil optimal.")
-
     horizon = HORIZON_MAP[horizon_label]
     atr_mult = ATR_MULT[strategi]
+    
+    # Detect currency
+    currency_symbol, currency_code = detect_currency(ticker)
 
-    with st.spinner(f"🔍 Fetching data for {ticker.upper()} from Twelve Data API..."):
-        df = fetch_twelve_data(ticker, start_date, end_date)
+    with st.spinner(f"🔍 Fetching 1 year data for {ticker.upper()}..."):
+        df = fetch_twelve_data(ticker, days_back=365)
 
     # Check for errors
     if "__error__" in df.columns:
         st.error(df["__error__"].iloc[0])
-        st.info("💡 **Tips:**\n- Pastikan ticker valid (contoh: AAPL, BBCA, MSFT)\n- Coba kurangi rentang waktu\n- Untuk saham Indonesia, jangan gunakan .JK")
+        st.info("💡 **Tips:**\n- Pastikan ticker valid (contoh: AAPL, BBCA, MSFT)\n- Untuk saham Indonesia, jangan gunakan .JK")
         st.stop()
 
     if df.empty:
         st.error("❌ Data kosong dari Twelve Data API.")
         st.stop()
 
-    st.success(f"✅ Berhasil mengambil **{len(df)}** data points untuk **{ticker.upper()}**")
+    st.success(f"✅ Berhasil mengambil **{len(df)}** data points untuk **{ticker.upper()}** (Currency: {currency_code})")
 
     # Show data preview
     with st.expander("📊 Data Preview (Last 10 rows)"):
@@ -480,13 +484,15 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("💰 Last Close", f"${last_close:.2f}")
+            st.metric("💰 Last Close", f"{currency_symbol}{last_close:,.0f}" if currency_code == "IDR" else f"{currency_symbol}{last_close:.2f}")
         with col2:
             predicted_price = ai_trend[-1]
             change_pct = ((predicted_price - last_close) / last_close) * 100
-            st.metric(f"🎯 Predicted ({horizon}d)", f"${predicted_price:.2f}", f"{change_pct:+.2f}%")
+            pred_display = f"{currency_symbol}{predicted_price:,.0f}" if currency_code == "IDR" else f"{currency_symbol}{predicted_price:.2f}"
+            st.metric(f"🎯 Predicted ({horizon}d)", pred_display, f"{change_pct:+.2f}%")
         with col3:
-            st.metric("📊 ATR (14)", f"${atr_last:.2f}")
+            atr_display = f"{currency_symbol}{atr_last:,.0f}" if currency_code == "IDR" else f"{currency_symbol}{atr_last:.2f}"
+            st.metric("📊 ATR (14)", atr_display)
         with col4:
             st.metric("🛡️ Strategy", strategi)
 
@@ -498,17 +504,25 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
             atr_last=atr_last,
             atr_mult=atr_mult,
             horizon=horizon,
+            currency_symbol=currency_symbol,
         )
 
         # Key levels
         resistance = ai_trend[-1] + (atr_last * atr_mult)
         support = ai_trend[-1] - (atr_last * atr_mult)
         
+        if currency_code == "IDR":
+            resistance_display = f"{currency_symbol}{resistance:,.0f}"
+            support_display = f"{currency_symbol}{support:,.0f}"
+        else:
+            resistance_display = f"{currency_symbol}{resistance:.2f}"
+            support_display = f"{currency_symbol}{support:.2f}"
+        
         col1, col2 = st.columns(2)
         with col1:
-            st.success(f"📈 **Resistance Level:** ${resistance:.2f}")
+            st.success(f"📈 **Resistance Level:** {resistance_display}")
         with col2:
-            st.error(f"📉 **Support Level:** ${support:.2f}")
+            st.error(f"📉 **Support Level:** {support_display}")
         
         # Trading signal
         if change_pct > 2:
@@ -523,9 +537,9 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
         st.exception(e)
         st.info(
             "💡 **Troubleshooting:**\n"
-            "- Pastikan rentang tanggal cukup panjang (minimal 1 tahun)\n"
-            "- Model membutuhkan 10 fitur dengan timesteps tertentu\n"
-            "- Coba ticker lain atau rentang waktu berbeda"
+            "- Model membutuhkan minimal 1 tahun data historis\n"
+            "- Coba ticker lain atau tunggu beberapa menit\n"
+            "- Pastikan ticker tersedia di Twelve Data API"
         )
 
 # Footer
