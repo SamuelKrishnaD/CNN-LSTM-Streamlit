@@ -6,6 +6,9 @@ scikit-learn
 tensorflow
 keras
 plotly
-yfinance>=0.2.40
+yfinance==0.2.38
 requests
 Pillow
+lxml
+html5lib
+beautifulsoup4

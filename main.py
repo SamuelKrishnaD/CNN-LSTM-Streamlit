@@ -8,6 +8,10 @@ import streamlit as st
 import tensorflow as tf
 import yfinance as yf
 
+# CRITICAL: Disable curl_cffi to prevent impersonation errors
+import sys
+sys.modules['curl_cffi'] = None
+
 st.set_page_config(page_title="MarketSense", layout="wide")
 
 # =========================
@@ -38,36 +42,22 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Robust yfinance fetch (retry + candidates) - FIXED
+# Robust yfinance fetch (retry + candidates) - FIXED FOR STREAMLIT CLOUD
 # =========================
 @st.cache_data(ttl=600)
 def fetch_yf_ohlc(ticker: str, start, end) -> pd.DataFrame:
     def _download(sym: str) -> pd.DataFrame:
         try:
-            # Method 1: Try with Ticker object (more reliable)
-            ticker_obj = yf.Ticker(sym)
+            # Force use of requests library instead of curl_cffi
+            import requests
+            session = requests.Session()
+            session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            
+            ticker_obj = yf.Ticker(sym, session=session)
             df = ticker_obj.history(start=start, end=end, auto_adjust=False)
             
-            if df is None or df.empty:
-                # Method 2: Fallback to download method
-                df = yf.download(
-                    sym,
-                    start=start,
-                    end=end,
-                    auto_adjust=False,
-                    progress=False,
-                    threads=False,
-                )
         except Exception as e:
-            # If curl_cffi error, try without it
-            if "Impersonating" in str(e) or "chrome" in str(e).lower():
-                try:
-                    ticker_obj = yf.Ticker(sym)
-                    df = ticker_obj.history(start=start, end=end, auto_adjust=False)
-                except:
-                    return pd.DataFrame()
-            else:
-                return pd.DataFrame()
+            return pd.DataFrame()
         
         if df is None or df.empty:
             return pd.DataFrame()
@@ -106,18 +96,18 @@ def fetch_yf_ohlc(ticker: str, start, end) -> pd.DataFrame:
                 if not df.empty:
                     return df
                 # if empty, wait and retry
-                time.sleep(0.5 + attempt * 0.5)
+                time.sleep(1.0 + attempt * 1.0)
             except Exception as e:
                 last_err = e
-                time.sleep(0.5 + attempt * 0.5)
+                time.sleep(1.0 + attempt * 1.0)
 
     # still empty => give informative message
     msg = (
         f"Yahoo Finance returned empty for {ticker} (tried: {candidates}). "
-        "Ini biasanya karena ticker tidak valid atau Yahoo memblokir request."
+        "Kemungkinan: (1) Ticker tidak valid, (2) Market sedang tutup, atau (3) Yahoo Finance sedang down."
     )
     if last_err is not None:
-        msg += f" Last error: {repr(last_err)}"
+        msg += f" Error: {str(last_err)[:200]}"
 
     return pd.DataFrame({"__error__": [msg]})
 
@@ -311,10 +301,16 @@ with c3:
     horizon_label = st.selectbox("Horizon", ("5 hari kedepan", "10 hari kedepan"))
 
 d1, d2 = st.columns(2)
+
+# Smart defaults: 1 year of data
+from datetime import datetime, timedelta
+default_end = datetime.now().date()
+default_start = default_end - timedelta(days=365)
+
 with d1:
-    start_date = st.date_input("Start Date")
+    start_date = st.date_input("Start Date", value=default_start)
 with d2:
-    end_date = st.date_input("End Date")
+    end_date = st.date_input("End Date", value=default_end)
 
 if st.button("Submit"):
     ticker = (nama_saham or "").strip()
