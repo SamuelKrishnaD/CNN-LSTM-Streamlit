@@ -1,7 +1,12 @@
 streamlit
-tensorflow==2.20.0
 numpy
 pandas
+matplotlib
 scikit-learn
-yfinance==0.2.37
+tensorflow==2.20.0
+keras==3.12.0
 plotly
+yfinance==0.2.37
+curl_cffi==0.7.3
+requests==2.32.5
+Pillow
