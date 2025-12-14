@@ -21,7 +21,7 @@ ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
 # =========================
 # Secrets
 # =========================
-API_KEY = st.secrets.get("834520fe59bf440d887d734f86089b3e", "")
+API_KEY = st.secrets.get("TWELVEDATA_API_KEY", "")
 if not API_KEY:
     st.error("TWELVEDATA_API_KEY belum diset. Tambahkan di Streamlit Secrets.")
     st.stop()
