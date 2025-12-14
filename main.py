@@ -1,16 +1,11 @@
-import time
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import tensorflow as tf
 import yfinance as yf
-
-# CRITICAL: Disable curl_cffi to prevent impersonation errors
-import sys
-sys.modules['curl_cffi'] = None
+from pathlib import Path
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="MarketSense", layout="wide")
 
@@ -42,72 +37,71 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Robust yfinance fetch (retry + candidates) - FIXED FOR STREAMLIT CLOUD
+# Robust yfinance fetch - USING yf.download() like your working code
 # =========================
 @st.cache_data(ttl=600)
 def fetch_yf_ohlc(ticker: str, start, end) -> pd.DataFrame:
     def _download(sym: str) -> pd.DataFrame:
         try:
-            # Force use of requests library instead of curl_cffi
-            import requests
-            session = requests.Session()
-            session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            # Use yf.download() directly - this works better!
+            df = yf.download(sym, start=start, end=end, progress=False)
             
-            ticker_obj = yf.Ticker(sym, session=session)
-            df = ticker_obj.history(start=start, end=end, auto_adjust=False)
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            # Reset index
+            df = df.reset_index()
+
+            # Flatten multiindex if present (common with yf.download)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+
+            # Normalize date column name
+            if "Date" not in df.columns and "Datetime" in df.columns:
+                df = df.rename(columns={"Datetime": "Date"})
+
+            # Check required columns exist
+            needed = {"Date", "Open", "High", "Low", "Close"}
+            if not needed.issubset(df.columns):
+                return pd.DataFrame()
+
+            # Clean and sort
+            df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"]).sort_values("Date")
+            
+            return df
             
         except Exception as e:
             return pd.DataFrame()
-        
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        df = df.reset_index()
-
-        # flatten multiindex if present
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-
-        # normalize date col
-        if "Date" not in df.columns and "Datetime" in df.columns:
-            df = df.rename(columns={"Datetime": "Date"})
-
-        needed = {"Date", "Open", "High", "Low", "Close"}
-        if not needed.issubset(df.columns):
-            return pd.DataFrame()
-
-        df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"]).sort_values("Date")
-        return df
 
     t = (ticker or "").strip().upper()
 
-    # try both with/without .JK automatically
+    # Try with user's input first, then add/remove .JK
     candidates = [t]
-    if t.endswith(".JK"):
+    if ".JK" in t:
         candidates.append(t.replace(".JK", ""))
     else:
-        candidates.append(t + ".JK")
+        candidates.append(f"{t}.JK")
 
     last_err = None
     for sym in candidates:
-        for attempt in range(3):
-            try:
-                df = _download(sym)
-                if not df.empty:
-                    return df
-                # if empty, wait and retry
-                time.sleep(1.0 + attempt * 1.0)
-            except Exception as e:
-                last_err = e
-                time.sleep(1.0 + attempt * 1.0)
+        try:
+            df = _download(sym)
+            if not df.empty:
+                st.success(f"✅ Data berhasil diambil untuk ticker: **{sym}**")
+                return df
+        except Exception as e:
+            last_err = e
+            continue
 
-    # still empty => give informative message
+    # All attempts failed
     msg = (
-        f"Yahoo Finance returned empty for {ticker} (tried: {candidates}). "
-        "Kemungkinan: (1) Ticker tidak valid, (2) Market sedang tutup, atau (3) Yahoo Finance sedang down."
+        f"Yahoo Finance tidak dapat mengambil data untuk {ticker} (tried: {candidates}). "
+        "\n\n**Kemungkinan penyebab:**\n"
+        "1. Ticker tidak valid - pastikan format benar (contoh: BBCA.JK, TLKM.JK)\n"
+        "2. Rentang tanggal tidak ada data trading\n"
+        "3. Market sedang tutup atau data belum tersedia\n\n"
+        "**Saran:** Coba ticker populer seperti: BBRI.JK, TLKM.JK, ASII.JK"
     )
-    if last_err is not None:
-        msg += f" Error: {str(last_err)[:200]}"
 
     return pd.DataFrame({"__error__": [msg]})
 
@@ -292,9 +286,31 @@ def plot_forecast_like_screenshot(
 st.title("MarketSense")
 st.markdown("AI Forecast + ATR Zone (Yahoo Finance) 📈")
 
+# Add helpful examples
+with st.expander("📋 Contoh Ticker Saham Indonesia"):
+    st.markdown("""
+    **Banking:**
+    - BBCA.JK (Bank BCA)
+    - BBRI.JK (Bank BRI)
+    - BMRI.JK (Bank Mandiri)
+    - BBNI.JK (Bank BNI)
+    
+    **Telco & Tech:**
+    - TLKM.JK (Telkom Indonesia)
+    - EXCL.JK (XL Axiata)
+    - GOTO.JK (GoTo Gojek Tokopedia)
+    
+    **Consumer & Retail:**
+    - ICBP.JK (Indofood CBP)
+    - UNVR.JK (Unilever Indonesia)
+    - ASII.JK (Astra International)
+    
+    **Note:** Gunakan format **TICKER.JK** untuk saham Indonesia
+    """)
+
 c1, c2, c3 = st.columns([2.2, 1.2, 1.2])
 with c1:
-    nama_saham = st.text_input("Ticker Saham", placeholder="contoh: BBCA.JK / BBNI.JK")
+    nama_saham = st.text_input("Ticker Saham", placeholder="contoh: BBCA.JK / TLKM.JK")
 with c2:
     strategi = st.selectbox("Strategi", ("Conservative", "Moderate", "Aggressive"))
 with c3:
