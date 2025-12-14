@@ -1,4 +1,3 @@
-# main.py
 import time
 from pathlib import Path
 
@@ -39,19 +38,37 @@ except Exception as e:
     st.stop()
 
 # =========================
-# Robust yfinance fetch (retry + candidates)
+# Robust yfinance fetch (retry + candidates) - FIXED
 # =========================
 @st.cache_data(ttl=600)
 def fetch_yf_ohlc(ticker: str, start, end) -> pd.DataFrame:
     def _download(sym: str) -> pd.DataFrame:
-        df = yf.download(
-            sym,
-            start=start,
-            end=end,
-            auto_adjust=False,
-            progress=False,
-            threads=False,  # important on Streamlit Cloud
-        )
+        try:
+            # Method 1: Try with Ticker object (more reliable)
+            ticker_obj = yf.Ticker(sym)
+            df = ticker_obj.history(start=start, end=end, auto_adjust=False)
+            
+            if df is None or df.empty:
+                # Method 2: Fallback to download method
+                df = yf.download(
+                    sym,
+                    start=start,
+                    end=end,
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                )
+        except Exception as e:
+            # If curl_cffi error, try without it
+            if "Impersonating" in str(e) or "chrome" in str(e).lower():
+                try:
+                    ticker_obj = yf.Ticker(sym)
+                    df = ticker_obj.history(start=start, end=end, auto_adjust=False)
+                except:
+                    return pd.DataFrame()
+            else:
+                return pd.DataFrame()
+        
         if df is None or df.empty:
             return pd.DataFrame()
 
@@ -89,15 +106,15 @@ def fetch_yf_ohlc(ticker: str, start, end) -> pd.DataFrame:
                 if not df.empty:
                     return df
                 # if empty, wait and retry
-                time.sleep(1.2 + attempt * 1.3)
+                time.sleep(0.5 + attempt * 0.5)
             except Exception as e:
                 last_err = e
-                time.sleep(1.2 + attempt * 1.3)
+                time.sleep(0.5 + attempt * 0.5)
 
     # still empty => give informative message
     msg = (
         f"Yahoo Finance returned empty for {ticker} (tried: {candidates}). "
-        "Ini biasanya karena Yahoo memblokir / rate-limit request dari Streamlit Cloud."
+        "Ini biasanya karena ticker tidak valid atau Yahoo memblokir request."
     )
     if last_err is not None:
         msg += f" Last error: {repr(last_err)}"
@@ -312,7 +329,8 @@ if st.button("Submit"):
     horizon = HORIZON_MAP[horizon_label]
     atr_mult = ATR_MULT[strategi]
 
-    df = fetch_yf_ohlc(ticker, start_date, end_date)
+    with st.spinner("Fetching data from Yahoo Finance..."):
+        df = fetch_yf_ohlc(ticker, start_date, end_date)
 
     # show yf error message clearly
     if "__error__" in df.columns:
@@ -328,11 +346,12 @@ if st.button("Submit"):
     atr_last = float(atr.dropna().iloc[-1]) if not atr.dropna().empty else 0.0
 
     try:
-        X = build_features_for_model(df)
-        y_pred = model.predict(X, verbose=0)
+        with st.spinner("Running AI prediction..."):
+            X = build_features_for_model(df)
+            y_pred = model.predict(X, verbose=0)
 
-        last_close = float(df["Close"].iloc[-1])
-        ai_trend = make_ai_trend(y_pred, last_close=last_close, horizon=horizon)
+            last_close = float(df["Close"].iloc[-1])
+            ai_trend = make_ai_trend(y_pred, last_close=last_close, horizon=horizon)
 
         plot_forecast_like_screenshot(
             df=df,

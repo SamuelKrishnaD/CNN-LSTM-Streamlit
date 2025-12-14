@@ -6,7 +6,6 @@ scikit-learn
 tensorflow
 keras
 plotly
-yfinance
-curl_cffi
+yfinance>=0.2.40
 requests
 Pillow
