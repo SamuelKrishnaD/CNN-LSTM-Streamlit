@@ -126,7 +126,7 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.rolling(period).mean()
 
 # =========================
-# Build input for model
+# Build input for model - EXACT TRAINING FEATURES
 # =========================
 def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     inp = model.input_shape
@@ -142,24 +142,94 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     else:
         raise ValueError(f"Unexpected input shape: {inp}")
 
-    close = df["Close"].astype(float).to_numpy()
-    if len(close) < timesteps:
-        raise ValueError(f"Data kurang. Butuh minimal {timesteps} bar, tapi hanya ada {len(close)}.")
+    if len(df) < timesteps + 30:  # Extra buffer for indicators
+        raise ValueError(f"Data kurang. Butuh minimal {timesteps + 30} bar, tapi hanya ada {len(df)}.")
 
-    window = close[-timesteps:]
-
-    # Scaling
-    wmin, wmax = window.min(), window.max()
-    window = (window - wmin) / (wmax - wmin + 1e-9)
-
-    if n_features != 1:
+    # Build exact training features
+    df_features = df.copy()
+    
+    # Convert to float
+    df_features["Close"] = df_features["Close"].astype(float)
+    df_features["Volume"] = df_features["Volume"].astype(float)
+    df_features["High"] = df_features["High"].astype(float)
+    df_features["Low"] = df_features["Low"].astype(float)
+    
+    # 1. Close (already have it)
+    
+    # 2. Volume (already have it)
+    
+    # 3. LogReturn
+    df_features["LogReturn"] = np.log(df_features["Close"] / df_features["Close"].shift(1))
+    
+    # 4. LogReturn_Lag1
+    df_features["LogReturn_Lag1"] = df_features["LogReturn"].shift(1)
+    
+    # 5. LogReturn_Lag2
+    df_features["LogReturn_Lag2"] = df_features["LogReturn"].shift(2)
+    
+    # 6. LogReturn_Lag3
+    df_features["LogReturn_Lag3"] = df_features["LogReturn"].shift(3)
+    
+    # 7. ATR_14
+    high = df_features["High"]
+    low = df_features["Low"]
+    close = df_features["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    df_features["ATR_14"] = tr.rolling(14).mean()
+    
+    # 8. RSI_14
+    delta = df_features["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df_features["RSI_14"] = 100 - (100 / (1 + rs))
+    
+    # 9. MACD
+    ema_12 = df_features["Close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df_features["Close"].ewm(span=26, adjust=False).mean()
+    df_features["MACD"] = ema_12 - ema_26
+    
+    # 10. VolChange
+    df_features["VolChange"] = df_features["Volume"].pct_change()
+    
+    # Select exact features in exact order
+    feature_cols = ['Close', 'Volume', 'LogReturn', 'LogReturn_Lag1', 'LogReturn_Lag2', 'LogReturn_Lag3',
+                    'ATR_14', 'RSI_14', 'MACD', 'VolChange']
+    
+    df_features = df_features[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if len(df_features) < timesteps:
         raise ValueError(
-            f"Model butuh n_features={n_features}, tapi builder ini hanya menyiapkan 1 fitur (Close)."
+            f"Setelah menghitung indikator, data tersisa {len(df_features)} bar. "
+            f"Butuh minimal {timesteps} bar. Gunakan start date lebih awal (minimal 1 tahun data)."
         )
-
-    X = window.reshape(1, timesteps, 1).astype(np.float32)
+    
+    # Get last window
+    window = df_features.tail(timesteps).values
+    
+    # Min-Max scaling per feature
+    feature_mins = window.min(axis=0)
+    feature_maxs = window.max(axis=0)
+    window_scaled = (window - feature_mins) / (feature_maxs - feature_mins + 1e-9)
+    
+    # Replace any remaining nan/inf with 0
+    window_scaled = np.nan_to_num(window_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Check if model expects correct number of features
+    if n_features != 10:
+        raise ValueError(
+            f"Model butuh n_features={n_features}, tapi builder menyiapkan 10 fitur. "
+            f"Model input shape: {inp}"
+        )
+    
+    X = window_scaled.reshape(1, timesteps, 10).astype(np.float32)
     if channels == 1:
-        X = X[..., np.newaxis]
+        X = X[..., np.newaxis]  # (1, timesteps, 10, 1)
 
     return X
 
@@ -167,19 +237,34 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
 # Forecast helpers
 # =========================
 def make_ai_trend(y_pred: np.ndarray, last_close: float, horizon: int) -> np.ndarray:
+    """
+    Convert model predictions to price trend
+    Model predicts: [Target_High_Ret, Target_Low_Ret]
+    """
     y = np.array(y_pred).squeeze()
-
-    if y.ndim == 0:
-        end_val = float(y)
-        return np.linspace(last_close, end_val, num=horizon + 1)[1:]
-
-    if y.ndim == 1:
+    
+    # If model outputs 2 values (high_ret, low_ret), use average
+    if y.ndim == 1 and len(y) == 2:
+        avg_return = (y[0] + y[1]) / 2
+        # Convert return to price
+        end_price = last_close * (1 + avg_return)
+        return np.linspace(last_close, end_price, num=horizon + 1)[1:]
+    
+    # If model outputs single value
+    if y.ndim == 0 or (y.ndim == 1 and len(y) == 1):
+        end_val = float(y[0]) if y.ndim == 1 else float(y)
+        end_price = last_close * (1 + end_val)
+        return np.linspace(last_close, end_price, num=horizon + 1)[1:]
+    
+    # If model outputs sequence
+    if y.ndim == 1 and len(y) > 2:
         if len(y) == horizon:
             return y.astype(float)
+        # Resample to horizon
         x_old = np.linspace(0, 1, num=len(y))
         x_new = np.linspace(0, 1, num=horizon)
         return np.interp(x_new, x_old, y).astype(float)
-
+    
     raise ValueError(f"Output shape tidak didukung: {np.array(y_pred).shape}")
 
 def plot_forecast_like_screenshot(
@@ -210,11 +295,12 @@ def plot_forecast_like_screenshot(
             y=df["Close"],
             mode="lines+markers",
             name="Harga Historis",
-            line=dict(color="#00D9FF"),
+            line=dict(color="#00D9FF", width=2),
+            marker=dict(size=4),
         )
     )
 
-    # Safe zone
+    # Safe zone (fill)
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -222,6 +308,7 @@ def plot_forecast_like_screenshot(
             mode="lines",
             line=dict(width=0),
             showlegend=False,
+            hoverinfo='skip',
         )
     )
     fig.add_trace(
@@ -233,6 +320,7 @@ def plot_forecast_like_screenshot(
             name=f"Zona Aman (AI + ATR {atr_mult:.1f}x)",
             fillcolor="rgba(0, 217, 255, 0.2)",
             line=dict(width=0),
+            hoverinfo='skip',
         )
     )
 
@@ -241,13 +329,14 @@ def plot_forecast_like_screenshot(
         go.Scatter(
             x=future_dates,
             y=ai_series.values,
-            mode="lines",
+            mode="lines+markers",
             name="AI Trend",
-            line=dict(dash="dash", color="#FFD700", width=2),
+            line=dict(dash="dash", color="#FFD700", width=3),
+            marker=dict(size=6),
         )
     )
 
-    # Resistance / Support
+    # Resistance
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -257,6 +346,8 @@ def plot_forecast_like_screenshot(
             line=dict(dash="dot", color="#FF4444", width=2),
         )
     )
+    
+    # Support
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -268,14 +359,19 @@ def plot_forecast_like_screenshot(
     )
 
     fig.update_layout(
-        title=f"Forecast {ticker.upper()}: {horizon} Days Ahead",
+        title=f"📈 Forecast {ticker.upper()}: {horizon} Days Ahead",
         xaxis_title="Tanggal",
-        yaxis_title="Harga",
-        height=580,
+        yaxis_title="Harga (USD)",
+        height=600,
         template="plotly_dark",
         margin=dict(l=10, r=10, t=60, b=10),
-        legend=dict(x=0.01, y=0.99),
+        legend=dict(
+            x=0.01, 
+            y=0.99,
+            bgcolor="rgba(0,0,0,0.5)",
+        ),
         xaxis_rangeslider_visible=False,
+        hovermode='x unified',
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -283,39 +379,40 @@ def plot_forecast_like_screenshot(
 # =========================
 # UI
 # =========================
-st.title("MarketSense")
-st.markdown("🚀 AI Forecast + ATR Zone (Powered by Twelve Data API)")
+st.title("📊 MarketSense")
+st.markdown("🚀 **AI-Powered Stock Forecast** | Powered by Twelve Data API")
 
 # Helpful examples
-with st.expander("📋 Supported Tickers"):
+with st.expander("📋 Supported Tickers & Examples"):
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
         **🇺🇸 US Stocks:**
-        - AAPL (Apple)
-        - MSFT (Microsoft)
-        - GOOGL (Google)
-        - TSLA (Tesla)
-        - NVDA (NVIDIA)
-        - AMZN (Amazon)
+        - `AAPL` - Apple Inc.
+        - `MSFT` - Microsoft
+        - `GOOGL` - Alphabet (Google)
+        - `TSLA` - Tesla
+        - `NVDA` - NVIDIA
+        - `AMZN` - Amazon
+        - `META` - Meta (Facebook)
         """)
     with col2:
         st.markdown("""
         **🇮🇩 Indonesian Stocks:**
-        - BBCA (Bank BCA)
-        - BBRI (Bank BRI)
-        - TLKM (Telkom)
-        - ASII (Astra)
-        - UNVR (Unilever)
+        - `BBCA` - Bank BCA
+        - `BBRI` - Bank BRI
+        - `TLKM` - Telkom Indonesia
+        - `ASII` - Astra International
+        - `UNVR` - Unilever Indonesia
         
-        *Note: No need for .JK suffix*
+        💡 *No .JK suffix needed*
         """)
 
 c1, c2, c3 = st.columns([2.2, 1.2, 1.2])
 with c1:
     nama_saham = st.text_input("Ticker Saham", placeholder="contoh: AAPL, BBCA, MSFT")
 with c2:
-    strategi = st.selectbox("Strategi", ("Conservative", "Moderate", "Aggressive"))
+    strategi = st.selectbox("Strategi Risk", ("Conservative", "Moderate", "Aggressive"))
 with c3:
     horizon_label = st.selectbox("Horizon", ("5 hari kedepan", "10 hari kedepan"))
 
@@ -329,7 +426,9 @@ with d1:
 with d2:
     end_date = st.date_input("End Date", value=default_end)
 
-if st.button("🔮 Submit", type="primary"):
+st.info("💡 **Tip:** Gunakan minimal 1 tahun data untuk hasil prediksi optimal")
+
+if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True):
     ticker = (nama_saham or "").strip()
     if not ticker:
         st.error("❌ Ticker saham belum diisi.")
@@ -338,11 +437,16 @@ if st.button("🔮 Submit", type="primary"):
     if start_date >= end_date:
         st.error("❌ Start Date harus lebih kecil dari End Date.")
         st.stop()
+    
+    # Check minimum date range
+    days_diff = (end_date - start_date).days
+    if days_diff < 180:
+        st.warning("⚠️ Rentang waktu terlalu pendek. Minimal 6 bulan untuk hasil optimal.")
 
     horizon = HORIZON_MAP[horizon_label]
     atr_mult = ATR_MULT[strategi]
 
-    with st.spinner(f"🔍 Fetching data for {ticker.upper()}..."):
+    with st.spinner(f"🔍 Fetching data for {ticker.upper()} from Twelve Data API..."):
         df = fetch_twelve_data(ticker, start_date, end_date)
 
     # Check for errors
@@ -355,18 +459,18 @@ if st.button("🔮 Submit", type="primary"):
         st.error("❌ Data kosong dari Twelve Data API.")
         st.stop()
 
-    st.success(f"✅ Berhasil mengambil {len(df)} data points untuk {ticker.upper()}")
+    st.success(f"✅ Berhasil mengambil **{len(df)}** data points untuk **{ticker.upper()}**")
 
     # Show data preview
-    with st.expander("📊 Data Preview"):
-        st.dataframe(df.tail(10))
+    with st.expander("📊 Data Preview (Last 10 rows)"):
+        st.dataframe(df.tail(10), use_container_width=True)
 
     # Calculate ATR
     atr = compute_atr(df, period=14)
     atr_last = float(atr.dropna().iloc[-1]) if not atr.dropna().empty else 0.0
 
     try:
-        with st.spinner("🤖 Running AI prediction..."):
+        with st.spinner("🤖 Running AI prediction model..."):
             X = build_features_for_model(df)
             y_pred = model.predict(X, verbose=0)
 
@@ -376,15 +480,15 @@ if st.button("🔮 Submit", type="primary"):
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Last Close", f"${last_close:.2f}")
+            st.metric("💰 Last Close", f"${last_close:.2f}")
         with col2:
             predicted_price = ai_trend[-1]
             change_pct = ((predicted_price - last_close) / last_close) * 100
-            st.metric(f"Predicted ({horizon}d)", f"${predicted_price:.2f}", f"{change_pct:+.2f}%")
+            st.metric(f"🎯 Predicted ({horizon}d)", f"${predicted_price:.2f}", f"{change_pct:+.2f}%")
         with col3:
-            st.metric("ATR (14)", f"${atr_last:.2f}")
+            st.metric("📊 ATR (14)", f"${atr_last:.2f}")
         with col4:
-            st.metric("Strategy", strategi)
+            st.metric("🛡️ Strategy", strategi)
 
         # Plot
         plot_forecast_like_screenshot(
@@ -396,18 +500,35 @@ if st.button("🔮 Submit", type="primary"):
             horizon=horizon,
         )
 
-        # Additional info
-        st.info(f"📈 **Resistance Level:** ${(ai_trend[-1] + atr_last * atr_mult):.2f} | "
-                f"📉 **Support Level:** ${(ai_trend[-1] - atr_last * atr_mult):.2f}")
+        # Key levels
+        resistance = ai_trend[-1] + (atr_last * atr_mult)
+        support = ai_trend[-1] - (atr_last * atr_mult)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(f"📈 **Resistance Level:** ${resistance:.2f}")
+        with col2:
+            st.error(f"📉 **Support Level:** ${support:.2f}")
+        
+        # Trading signal
+        if change_pct > 2:
+            st.success("🟢 **Signal:** BULLISH - Potensi kenaikan harga")
+        elif change_pct < -2:
+            st.error("🔴 **Signal:** BEARISH - Potensi penurunan harga")
+        else:
+            st.info("🟡 **Signal:** NEUTRAL - Sideways/konsolidasi")
 
     except Exception as e:
         st.error("❌ Gagal membuat forecast.")
         st.exception(e)
         st.info(
-            "💡 Kalau error `n_features mismatch`, berarti model training pakai fitur > 1 (OHLCV/indikator). "
-            "Ubah `build_features_for_model()` agar sesuai `model.input_shape` dan scaling training."
+            "💡 **Troubleshooting:**\n"
+            "- Pastikan rentang tanggal cukup panjang (minimal 1 tahun)\n"
+            "- Model membutuhkan 10 fitur dengan timesteps tertentu\n"
+            "- Coba ticker lain atau rentang waktu berbeda"
         )
 
 # Footer
 st.markdown("---")
-st.caption("Powered by Twelve Data API | Model: LSTM+CNN | Strategy: ATR-based Risk Management")
+st.caption("⚡ Powered by Twelve Data API | 🤖 Model: LSTM+CNN | 📊 Strategy: ATR-based Risk Management")
+st.caption("⚠️ Disclaimer: Prediksi ini hanya untuk referensi. Lakukan riset mandiri sebelum trading.")
