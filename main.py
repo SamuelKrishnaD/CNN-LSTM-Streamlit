@@ -11,7 +11,7 @@ st.set_page_config(page_title="MarketSense", layout="centered")
 def load_model(path: str):
     return tf.keras.models.load_model(path)
 
-model = load_model("cnn_lstm_model.h5")  # TODO: rename to your file
+model = load_model("./LSTM_CNN_model.h5")  # TODO: rename to your file
 
 st.title("MarketSense")
 st.markdown("Masukkan saham + strategi + horizon prediksi, lalu jalankan modelnya. 📈")
