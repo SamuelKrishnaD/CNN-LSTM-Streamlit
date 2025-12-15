@@ -75,7 +75,16 @@ def fetch_idx_data(ticker: str, days_back: int = 365) -> pd.DataFrame:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
 
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+        # ✅ FIXED: explicit auto_adjust to remove warning + more stable args
+        df = yf.download(
+            symbol,
+            start=start_date,
+            end=end_date,
+            progress=False,
+            auto_adjust=False,
+            group_by="column",
+            threads=False,
+        )
 
         if df is None or df.empty:
             return pd.DataFrame({"__error__": [f"No data available for {ticker}"]})
@@ -150,22 +159,11 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     for col in ["Close", "Volume", "High", "Low"]:
         df_features[col] = df_features[col].astype(float)
 
-    # 1. Close (already have it)
-    # 2. Volume (already have it)
-    
-    # 3. LogReturn
     df_features["LogReturn"] = np.log(df_features["Close"] / df_features["Close"].shift(1))
-    
-    # 4. LogReturn_Lag1
     df_features["LogReturn_Lag1"] = df_features["LogReturn"].shift(1)
-    
-    # 5. LogReturn_Lag2
     df_features["LogReturn_Lag2"] = df_features["LogReturn"].shift(2)
-    
-    # 6. LogReturn_Lag3
     df_features["LogReturn_Lag3"] = df_features["LogReturn"].shift(3)
 
-    # 7. ATR_14
     high = df_features["High"]
     low = df_features["Low"]
     close = df_features["Close"]
@@ -178,22 +176,18 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     ).max(axis=1)
     df_features["ATR_14"] = tr.rolling(14).mean()
 
-    # 8. RSI_14
     delta = df_features["Close"].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df_features["RSI_14"] = 100 - (100 / (1 + rs))
 
-    # 9. MACD
     ema_12 = df_features["Close"].ewm(span=12, adjust=False).mean()
     ema_26 = df_features["Close"].ewm(span=26, adjust=False).mean()
     df_features["MACD"] = ema_12 - ema_26
 
-    # 10. VolChange
     df_features["VolChange"] = df_features["Volume"].pct_change()
 
-    # Select exact features in exact order
     feature_cols = [
         "Close", "Volume", "LogReturn", "LogReturn_Lag1", "LogReturn_Lag2",
         "LogReturn_Lag3", "ATR_14", "RSI_14", "MACD", "VolChange"
@@ -208,10 +202,8 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
             f"**Solusi:** Gunakan periode data lebih panjang (minimal 1 tahun)"
         )
 
-    # Get last window
     window = df_features.tail(timesteps).values
 
-    # Min-Max scaling per feature
     mins = window.min(axis=0)
     maxs = window.max(axis=0)
     window_scaled = (window - mins) / (maxs - mins + 1e-9)
@@ -227,34 +219,25 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
 # Forecast helpers
 # =========================
 def make_ai_trend(y_pred: np.ndarray, last_close: float, horizon: int) -> np.ndarray:
-    """
-    Convert model predictions to price trend
-    Model predicts: [Target_High_Ret, Target_Low_Ret]
-    """
     y = np.array(y_pred).squeeze()
-    
-    # If model outputs 2 values (high_ret, low_ret), use average
+
     if y.ndim == 1 and len(y) == 2:
         avg_return = (y[0] + y[1]) / 2
-        # Convert return to price
         end_price = last_close * (1 + avg_return)
         return np.linspace(last_close, end_price, num=horizon + 1)[1:]
-    
-    # If model outputs single value
+
     if y.ndim == 0 or (y.ndim == 1 and len(y) == 1):
         end_val = float(y[0]) if y.ndim == 1 else float(y)
         end_price = last_close * (1 + end_val)
         return np.linspace(last_close, end_price, num=horizon + 1)[1:]
-    
-    # If model outputs sequence
+
     if y.ndim == 1 and len(y) > 2:
         if len(y) == horizon:
             return y.astype(float)
-        # Resample to horizon
         x_old = np.linspace(0, 1, num=len(y))
         x_new = np.linspace(0, 1, num=horizon)
         return np.interp(x_new, x_old, y).astype(float)
-    
+
     raise ValueError(f"Output shape tidak didukung: {np.array(y_pred).shape}")
 
 def plot_forecast_idx(
@@ -278,7 +261,6 @@ def plot_forecast_idx(
 
     fig = go.Figure()
 
-    # Historical price
     fig.add_trace(
         go.Scatter(
             x=df["Date"],
@@ -290,7 +272,6 @@ def plot_forecast_idx(
         )
     )
 
-    # Safe zone (fill)
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -314,7 +295,6 @@ def plot_forecast_idx(
         )
     )
 
-    # AI trend
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -326,7 +306,6 @@ def plot_forecast_idx(
         )
     )
 
-    # Resistance
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -336,8 +315,7 @@ def plot_forecast_idx(
             line=dict(dash="dot", color="#FF4444", width=2),
         )
     )
-    
-    # Support
+
     fig.add_trace(
         go.Scatter(
             x=future_dates,
@@ -356,7 +334,7 @@ def plot_forecast_idx(
         template="plotly_dark",
         margin=dict(l=10, r=10, t=60, b=10),
         legend=dict(
-            x=0.01, 
+            x=0.01,
             y=0.99,
             bgcolor="rgba(0,0,0,0.5)",
         ),
@@ -372,7 +350,6 @@ def plot_forecast_idx(
 st.title("📊 MarketSense IDX")
 st.markdown("🇮🇩 **AI-Powered IDX Stock Forecast** | Powered by Yahoo Finance")
 
-# IDX stock list
 with st.expander("📋 Daftar Saham IDX yang Tersedia"):
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -400,12 +377,11 @@ with st.expander("📋 Daftar Saham IDX yang Tersedia"):
         - `ICBP` - Indofood CBP
         - `INDF` - Indofood Sukses Makmur
         """)
-    
+
     st.markdown("""
     **💡 Tips:** Cukup ketik kode saham tanpa suffix .JK (contoh: `BBCA`, `TLKM`, `ASII`)
     """)
 
-# Simple 3-input form
 c1, c2, c3 = st.columns(3)
 with c1:
     nama_saham = st.text_input("📌 Kode Saham IDX", placeholder="contoh: BBCA, TLKM, ASII")
@@ -428,7 +404,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
     with st.spinner(f"🔍 Fetching 1 year data for {ticker.upper()}.JK dari Yahoo Finance..."):
         df = fetch_idx_data(ticker, days_back=365)
 
-    # Check for errors
     if "__error__" in df.columns:
         st.error(df["__error__"].iloc[0])
         st.info("💡 **Tips:**\n- Pastikan kode saham IDX valid (contoh: BBCA, TLKM, ASII)\n- Jangan tambahkan .JK di input\n- Coba saham lain jika data tidak tersedia")
@@ -440,14 +415,12 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
 
     st.success(f"✅ Berhasil mengambil **{len(df)}** data points untuk **{ticker.upper()}.JK**")
 
-    # Show data preview
     with st.expander("📊 Data Preview (10 Hari Terakhir)"):
         preview_df = df.tail(10).copy()
         preview_df['Close'] = preview_df['Close'].apply(lambda x: f"Rp {x:,.0f}")
         preview_df['Volume'] = preview_df['Volume'].apply(lambda x: f"{x:,.0f}")
         st.dataframe(preview_df, use_container_width=True)
 
-    # Calculate ATR
     atr = compute_atr(df, period=14)
     atr_last = float(atr.dropna().iloc[-1]) if not atr.dropna().empty else 0.0
 
@@ -459,7 +432,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
             last_close = float(df["Close"].iloc[-1])
             ai_trend = make_ai_trend(y_pred, last_close=last_close, horizon=horizon)
 
-        # Display metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("💰 Harga Terakhir", f"Rp {last_close:,.0f}")
@@ -472,7 +444,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
         with col4:
             st.metric("🛡️ Strategy", strategi)
 
-        # Plot
         plot_forecast_idx(
             df=df,
             ticker=ticker,
@@ -482,17 +453,15 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
             horizon=horizon,
         )
 
-        # Key levels
         resistance = ai_trend[-1] + (atr_last * atr_mult)
         support = ai_trend[-1] - (atr_last * atr_mult)
-        
+
         col1, col2 = st.columns(2)
         with col1:
             st.success(f"📈 **Resistance Level:** Rp {resistance:,.0f}")
         with col2:
             st.error(f"📉 **Support Level:** Rp {support:,.0f}")
-        
-        # Trading signal
+
         if change_pct > 2:
             st.success("🟢 **Signal:** BULLISH - Potensi kenaikan harga")
         elif change_pct < -2:
@@ -510,7 +479,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
             "- Pastikan saham aktif diperdagangkan di IDX"
         )
 
-# Footer
 st.markdown("---")
 st.caption("⚡ Powered by Yahoo Finance | 🤖 Model: LSTM+CNN (.keras file) | 📊 Strategy: ATR-based Risk Management")
 st.caption("⚠️ Disclaimer: Prediksi ini hanya untuk referensi. Lakukan riset mandiri sebelum trading.")
