@@ -13,7 +13,7 @@ st.set_page_config(page_title="MarketSense IDX", layout="wide")
 # Config
 # =========================
 APP_DIR = Path(__file__).parent
-MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras" / "LSTM_CNN_model.keras"
+MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras"
 
 HORIZON_MAP = {"5 hari kedepan": 5, "10 hari kedepan": 10}
 ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
