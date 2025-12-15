@@ -1,9 +1,9 @@
-streamlit
+streamlit==1.52.1
 numpy
 pandas
 plotly
 requests
 Pillow
 scikit-learn
-tensorflow==2.15.0
+tensorflow==2.20.0
 yfinance==0.2.36
