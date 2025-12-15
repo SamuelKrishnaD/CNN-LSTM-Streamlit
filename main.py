@@ -2,10 +2,15 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import tensorflow as tf
 import yfinance as yf
 from pathlib import Path
 from datetime import datetime, timedelta
+
+# Import keras/tensorflow properly
+try:
+    from keras.models import load_model
+except ImportError:
+    from tensorflow.keras.models import load_model
 
 st.set_page_config(page_title="MarketSense IDX", layout="wide")
 
@@ -13,7 +18,7 @@ st.set_page_config(page_title="MarketSense IDX", layout="wide")
 # Config
 # =========================
 APP_DIR = Path(__file__).parent
-MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras" / "LSTM_CNN_model.keras"
+MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras"  # Folder containing config.json, metadata.json, model.weights.h5
 
 HORIZON_MAP = {"5 hari kedepan": 5, "10 hari kedepan": 10}
 ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
@@ -23,18 +28,46 @@ ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
 # =========================
 @st.cache_resource
 def load_model_cached(path: str):
-    return tf.keras.models.load_model(path, compile=False)
+    """Load Keras 3.x model from .keras folder"""
+    return load_model(path, compile=False)
 
+# Check if model folder exists
 if not MODEL_PATH.exists():
-    st.error(f"Model file tidak ditemukan di: {MODEL_PATH}")
-    st.info("Pastikan folder `LSTM_CNN_model.keras` ada dan berisi file `LSTM_CNN_model.keras`")
+    st.error(f"❌ Model folder tidak ditemukan: `{MODEL_PATH.name}`")
+    st.info("Pastikan folder `LSTM_CNN_model.keras` ada di direktori yang sama dengan `main.py`")
+    st.stop()
+
+if not MODEL_PATH.is_dir():
+    st.error(f"❌ `{MODEL_PATH.name}` harus berupa folder, bukan file")
+    st.stop()
+
+# Check for required files
+required_files = ["config.json", "metadata.json", "model.weights.h5"]
+missing = [f for f in required_files if not (MODEL_PATH / f).exists()]
+if missing:
+    st.error(f"❌ File yang dibutuhkan tidak ada: {missing}")
+    st.info(f"Isi folder saat ini: {[f.name for f in MODEL_PATH.iterdir()]}")
     st.stop()
 
 try:
     model = load_model_cached(str(MODEL_PATH))
+    # Show model info in sidebar
+    st.sidebar.success(f"✅ Model loaded successfully")
+    with st.sidebar.expander("📊 Model Info"):
+        st.write(f"**Input Shape:** {model.input_shape}")
+        st.write(f"**Output Shape:** {model.output_shape}")
+        st.write(f"**Timesteps:** {model.input_shape[1]}")
+        st.write(f"**Features:** {model.input_shape[2]}")
 except Exception as e:
-    st.error("Gagal load model .keras")
+    st.error("❌ Gagal memuat model")
     st.exception(e)
+    st.info(
+        "**Debug info:**\n"
+        f"- Path: `{MODEL_PATH}`\n"
+        f"- Exists: {MODEL_PATH.exists()}\n"
+        f"- Is dir: {MODEL_PATH.is_dir()}\n"
+        f"- Files: {[f.name for f in MODEL_PATH.glob('*')]}"
+    )
     st.stop()
 
 # =========================
@@ -42,49 +75,38 @@ except Exception as e:
 # =========================
 @st.cache_data(ttl=600)
 def fetch_idx_data(ticker: str, days_back: int = 365) -> pd.DataFrame:
-    """
-    Fetch OHLC data from Yahoo Finance for Indonesian stocks
-    Automatically fetches last N days of data
-    """
+    """Fetch OHLC data from Yahoo Finance for Indonesian stocks"""
     try:
-        # Add .JK suffix for Indonesian stocks if not present
         symbol = ticker.upper()
         if not symbol.endswith(".JK"):
             symbol = f"{symbol}.JK"
-        
-        # Calculate date range
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
-        
-        # Download data
+
         df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-        
+
         if df is None or df.empty:
             return pd.DataFrame({"__error__": [f"No data available for {ticker}"]})
-        
-        # Reset index
+
         df = df.reset_index()
-        
-        # Flatten multiindex if present
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-        
-        # Normalize date column
+
         if "Date" not in df.columns and "Datetime" in df.columns:
             df = df.rename(columns={"Datetime": "Date"})
-        
-        # Check required columns
+
         needed = {"Date", "Open", "High", "Low", "Close", "Volume"}
         if not needed.issubset(df.columns):
             return pd.DataFrame({"__error__": [f"Missing required columns for {ticker}"]})
-        
-        # Select and clean
+
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
         df = df.sort_values("Date").reset_index(drop=True)
-        
+
         return df
-        
+
     except Exception as e:
         return pd.DataFrame({"__error__": [f"Error fetching {ticker}: {str(e)[:200]}"]})
 
@@ -115,17 +137,17 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     inp = model.input_shape
 
     if isinstance(inp, list):
-        raise ValueError(f"Model multi-input terdeteksi: {inp}. Builder perlu disesuaikan.")
+        raise ValueError(f"Model multi-input terdeteksi: {inp}")
 
+    channels = None
     if len(inp) == 3:
         _, timesteps, n_features = inp
-        channels = None
     elif len(inp) == 4:
         _, timesteps, n_features, channels = inp
     else:
         raise ValueError(f"Unexpected input shape: {inp}")
 
-    if len(df) < timesteps + 30:  # Extra buffer for indicators
+    if len(df) < timesteps + 30:
         raise ValueError(
             f"⚠️ Data tidak cukup!\n"
             f"- Data tersedia: {len(df)} hari\n"
@@ -133,17 +155,11 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
             f"Model membutuhkan {timesteps} timesteps + 30 hari untuk indikator"
         )
 
-    # Build exact training features
     df_features = df.copy()
-    
-    # Convert to float
-    df_features["Close"] = df_features["Close"].astype(float)
-    df_features["Volume"] = df_features["Volume"].astype(float)
-    df_features["High"] = df_features["High"].astype(float)
-    df_features["Low"] = df_features["Low"].astype(float)
-    
+    for col in ["Close", "Volume", "High", "Low"]:
+        df_features[col] = df_features[col].astype(float)
+
     # 1. Close (already have it)
-    
     # 2. Volume (already have it)
     
     # 3. LogReturn
@@ -157,68 +173,62 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     
     # 6. LogReturn_Lag3
     df_features["LogReturn_Lag3"] = df_features["LogReturn"].shift(3)
-    
+
     # 7. ATR_14
     high = df_features["High"]
     low = df_features["Low"]
     close = df_features["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [(high - low).abs(),
+         (high - prev_close).abs(),
+         (low - prev_close).abs()],
+        axis=1
+    ).max(axis=1)
     df_features["ATR_14"] = tr.rolling(14).mean()
-    
+
     # 8. RSI_14
     delta = df_features["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df_features["RSI_14"] = 100 - (100 / (1 + rs))
-    
+
     # 9. MACD
     ema_12 = df_features["Close"].ewm(span=12, adjust=False).mean()
     ema_26 = df_features["Close"].ewm(span=26, adjust=False).mean()
     df_features["MACD"] = ema_12 - ema_26
-    
+
     # 10. VolChange
     df_features["VolChange"] = df_features["Volume"].pct_change()
-    
+
     # Select exact features in exact order
-    feature_cols = ['Close', 'Volume', 'LogReturn', 'LogReturn_Lag1', 'LogReturn_Lag2', 'LogReturn_Lag3',
-                    'ATR_14', 'RSI_14', 'MACD', 'VolChange']
-    
+    feature_cols = [
+        "Close", "Volume", "LogReturn", "LogReturn_Lag1", "LogReturn_Lag2",
+        "LogReturn_Lag3", "ATR_14", "RSI_14", "MACD", "VolChange"
+    ]
+
     df_features = df_features[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
-    
+
     if len(df_features) < timesteps:
         raise ValueError(
             f"⚠️ Setelah menghitung indikator teknikal, data tersisa hanya {len(df_features)} hari.\n"
             f"Model membutuhkan minimal {timesteps} hari.\n"
             f"**Solusi:** Gunakan periode data lebih panjang (minimal 1 tahun)"
         )
-    
+
     # Get last window
     window = df_features.tail(timesteps).values
-    
+
     # Min-Max scaling per feature
-    feature_mins = window.min(axis=0)
-    feature_maxs = window.max(axis=0)
-    window_scaled = (window - feature_mins) / (feature_maxs - feature_mins + 1e-9)
-    
-    # Replace any remaining nan/inf with 0
-    window_scaled = np.nan_to_num(window_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Check if model expects correct number of features
-    if n_features != 10:
-        raise ValueError(
-            f"Model butuh n_features={n_features}, tapi builder menyiapkan 10 fitur. "
-            f"Model input shape: {inp}"
-        )
-    
+    mins = window.min(axis=0)
+    maxs = window.max(axis=0)
+    window_scaled = (window - mins) / (maxs - mins + 1e-9)
+    window_scaled = np.nan_to_num(window_scaled)
+
     X = window_scaled.reshape(1, timesteps, 10).astype(np.float32)
     if channels == 1:
-        X = X[..., np.newaxis]  # (1, timesteps, 10, 1)
+        X = X[..., np.newaxis]
 
     return X
 
@@ -511,6 +521,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
 
 # Footer
 st.markdown("---")
-st.caption("⚡ Powered by Yahoo Finance | 🤖 Model: LSTM+CNN (.keras) | 📊 Strategy: ATR-based Risk Management")
+st.caption("⚡ Powered by Yahoo Finance | 🤖 Model: LSTM+CNN (.keras format) | 📊 Strategy: ATR-based Risk Management")
 st.caption("⚠️ Disclaimer: Prediksi ini hanya untuk referensi. Lakukan riset mandiri sebelum trading.")
 st.caption("🇮🇩 Khusus untuk saham Bursa Efek Indonesia (IDX)")
