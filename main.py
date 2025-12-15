@@ -18,7 +18,7 @@ st.set_page_config(page_title="MarketSense IDX", layout="wide")
 # Config
 # =========================
 APP_DIR = Path(__file__).parent
-MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras"  # Folder containing config.json, metadata.json, model.weights.h5
+MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras"  # Single .keras file
 
 HORIZON_MAP = {"5 hari kedepan": 5, "10 hari kedepan": 10}
 ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
@@ -28,25 +28,17 @@ ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
 # =========================
 @st.cache_resource
 def load_model_cached(path: str):
-    """Load Keras 3.x model from .keras folder"""
+    """Load Keras model from .keras file"""
     return load_model(path, compile=False)
 
-# Check if model folder exists
+# Check if model file exists
 if not MODEL_PATH.exists():
-    st.error(f"❌ Model folder tidak ditemukan: `{MODEL_PATH.name}`")
-    st.info("Pastikan folder `LSTM_CNN_model.keras` ada di direktori yang sama dengan `main.py`")
+    st.error(f"❌ Model file tidak ditemukan: `{MODEL_PATH.name}`")
+    st.info("Pastikan file `LSTM_CNN_model.keras` ada di direktori yang sama dengan `main.py`")
     st.stop()
 
-if not MODEL_PATH.is_dir():
-    st.error(f"❌ `{MODEL_PATH.name}` harus berupa folder, bukan file")
-    st.stop()
-
-# Check for required files
-required_files = ["config.json", "metadata.json", "model.weights.h5"]
-missing = [f for f in required_files if not (MODEL_PATH / f).exists()]
-if missing:
-    st.error(f"❌ File yang dibutuhkan tidak ada: {missing}")
-    st.info(f"Isi folder saat ini: {[f.name for f in MODEL_PATH.iterdir()]}")
+if not MODEL_PATH.is_file():
+    st.error(f"❌ `{MODEL_PATH.name}` harus berupa file .keras")
     st.stop()
 
 try:
@@ -65,8 +57,7 @@ except Exception as e:
         "**Debug info:**\n"
         f"- Path: `{MODEL_PATH}`\n"
         f"- Exists: {MODEL_PATH.exists()}\n"
-        f"- Is dir: {MODEL_PATH.is_dir()}\n"
-        f"- Files: {[f.name for f in MODEL_PATH.glob('*')]}"
+        f"- Is file: {MODEL_PATH.is_file()}"
     )
     st.stop()
 
@@ -521,6 +512,6 @@ if st.button("🔮 Analyze & Predict", type="primary", use_container_width=True)
 
 # Footer
 st.markdown("---")
-st.caption("⚡ Powered by Yahoo Finance | 🤖 Model: LSTM+CNN (.keras format) | 📊 Strategy: ATR-based Risk Management")
+st.caption("⚡ Powered by Yahoo Finance | 🤖 Model: LSTM+CNN (.keras file) | 📊 Strategy: ATR-based Risk Management")
 st.caption("⚠️ Disclaimer: Prediksi ini hanya untuk referensi. Lakukan riset mandiri sebelum trading.")
 st.caption("🇮🇩 Khusus untuk saham Bursa Efek Indonesia (IDX)")
