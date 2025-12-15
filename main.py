@@ -126,7 +126,12 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
         raise ValueError(f"Unexpected input shape: {inp}")
 
     if len(df) < timesteps + 30:  # Extra buffer for indicators
-        raise ValueError(f"Data kurang. Butuh minimal {timesteps + 30} bar, tapi hanya ada {len(df)}.")
+        raise ValueError(
+            f"⚠️ Data tidak cukup!\n"
+            f"- Data tersedia: {len(df)} hari\n"
+            f"- Dibutuhkan: {timesteps + 30} hari\n"
+            f"Model membutuhkan {timesteps} timesteps + 30 hari untuk indikator"
+        )
 
     # Build exact training features
     df_features = df.copy()
@@ -188,8 +193,9 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     
     if len(df_features) < timesteps:
         raise ValueError(
-            f"Setelah menghitung indikator, data tersisa {len(df_features)} bar. "
-            f"Butuh minimal {timesteps} bar. Gunakan start date lebih awal (minimal 1 tahun data)."
+            f"⚠️ Setelah menghitung indikator teknikal, data tersisa hanya {len(df_features)} hari.\n"
+            f"Model membutuhkan minimal {timesteps} hari.\n"
+            f"**Solusi:** Gunakan periode data lebih panjang (minimal 1 tahun)"
         )
     
     # Get last window
