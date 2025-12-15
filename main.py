@@ -13,31 +13,27 @@ st.set_page_config(page_title="MarketSense IDX", layout="wide")
 # Config
 # =========================
 APP_DIR = Path(__file__).parent
-
-# IMPORTANT:
-# .keras IS A DIRECTORY, NOT A FILE
-MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras"
+MODEL_PATH = APP_DIR / "LSTM_CNN_model.keras" / "LSTM_CNN_model.keras"
 
 HORIZON_MAP = {"5 hari kedepan": 5, "10 hari kedepan": 10}
 ATR_MULT = {"Conservative": 0.8, "Moderate": 1.0, "Aggressive": 1.3}
 
 # =========================
-# Load model (cached) - CORRECTED
+# Load model (cached)
 # =========================
 @st.cache_resource
-def load_model_cached(model_dir: Path):
-    if not model_dir.exists():
-        raise FileNotFoundError(f"Model folder tidak ditemukan: {model_dir}")
-    if not model_dir.is_dir():
-        raise ValueError(f"Path harus folder .keras, bukan file: {model_dir}")
+def load_model_cached(path: str):
+    return tf.keras.models.load_model(path, compile=False)
 
-    # Load THE FOLDER
-    return tf.keras.models.load_model(model_dir, compile=False)
+if not MODEL_PATH.exists():
+    st.error(f"Model file tidak ditemukan di: {MODEL_PATH}")
+    st.info("Pastikan folder `LSTM_CNN_model.keras` ada dan berisi file `LSTM_CNN_model.keras`")
+    st.stop()
 
 try:
-    model = load_model_cached(MODEL_PATH)
+    model = load_model_cached(str(MODEL_PATH))
 except Exception as e:
-    st.error("❌ Gagal load model (.keras folder)")
+    st.error("Gagal load model .keras")
     st.exception(e)
     st.stop()
 
@@ -46,37 +42,49 @@ except Exception as e:
 # =========================
 @st.cache_data(ttl=600)
 def fetch_idx_data(ticker: str, days_back: int = 365) -> pd.DataFrame:
+    """
+    Fetch OHLC data from Yahoo Finance for Indonesian stocks
+    Automatically fetches last N days of data
+    """
     try:
+        # Add .JK suffix for Indonesian stocks if not present
         symbol = ticker.upper()
         if not symbol.endswith(".JK"):
             symbol = f"{symbol}.JK"
-
+        
+        # Calculate date range
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
-
+        
+        # Download data
         df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-
+        
         if df is None or df.empty:
             return pd.DataFrame({"__error__": [f"No data available for {ticker}"]})
-
+        
+        # Reset index
         df = df.reset_index()
-
+        
+        # Flatten multiindex if present
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-
+        
+        # Normalize date column
         if "Date" not in df.columns and "Datetime" in df.columns:
             df = df.rename(columns={"Datetime": "Date"})
-
+        
+        # Check required columns
         needed = {"Date", "Open", "High", "Low", "Close", "Volume"}
         if not needed.issubset(df.columns):
             return pd.DataFrame({"__error__": [f"Missing required columns for {ticker}"]})
-
+        
+        # Select and clean
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
         df = df.sort_values("Date").reset_index(drop=True)
-
+        
         return df
-
+        
     except Exception as e:
         return pd.DataFrame({"__error__": [f"Error fetching {ticker}: {str(e)[:200]}"]})
 
@@ -107,76 +115,106 @@ def build_features_for_model(df: pd.DataFrame) -> np.ndarray:
     inp = model.input_shape
 
     if isinstance(inp, list):
-        raise ValueError(f"Model multi-input terdeteksi: {inp}")
+        raise ValueError(f"Model multi-input terdeteksi: {inp}. Builder perlu disesuaikan.")
 
-    channels = None
     if len(inp) == 3:
         _, timesteps, n_features = inp
+        channels = None
     elif len(inp) == 4:
         _, timesteps, n_features, channels = inp
     else:
         raise ValueError(f"Unexpected input shape: {inp}")
 
-    if len(df) < timesteps + 30:
-        raise ValueError(f"Data kurang. Butuh minimal {timesteps + 30} bar.")
+    if len(df) < timesteps + 30:  # Extra buffer for indicators
+        raise ValueError(f"Data kurang. Butuh minimal {timesteps + 30} bar, tapi hanya ada {len(df)}.")
 
+    # Build exact training features
     df_features = df.copy()
-    for col in ["Close", "Volume", "High", "Low"]:
-        df_features[col] = df_features[col].astype(float)
-
+    
+    # Convert to float
+    df_features["Close"] = df_features["Close"].astype(float)
+    df_features["Volume"] = df_features["Volume"].astype(float)
+    df_features["High"] = df_features["High"].astype(float)
+    df_features["Low"] = df_features["Low"].astype(float)
+    
+    # 1. Close (already have it)
+    
+    # 2. Volume (already have it)
+    
+    # 3. LogReturn
     df_features["LogReturn"] = np.log(df_features["Close"] / df_features["Close"].shift(1))
+    
+    # 4. LogReturn_Lag1
     df_features["LogReturn_Lag1"] = df_features["LogReturn"].shift(1)
+    
+    # 5. LogReturn_Lag2
     df_features["LogReturn_Lag2"] = df_features["LogReturn"].shift(2)
+    
+    # 6. LogReturn_Lag3
     df_features["LogReturn_Lag3"] = df_features["LogReturn"].shift(3)
-
+    
+    # 7. ATR_14
     high = df_features["High"]
     low = df_features["Low"]
     close = df_features["Close"]
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(),
-         (high - prev_close).abs(),
-         (low - prev_close).abs()],
-        axis=1
-    ).max(axis=1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
     df_features["ATR_14"] = tr.rolling(14).mean()
-
+    
+    # 8. RSI_14
     delta = df_features["Close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df_features["RSI_14"] = 100 - (100 / (1 + rs))
-
+    
+    # 9. MACD
     ema_12 = df_features["Close"].ewm(span=12, adjust=False).mean()
     ema_26 = df_features["Close"].ewm(span=26, adjust=False).mean()
     df_features["MACD"] = ema_12 - ema_26
-
+    
+    # 10. VolChange
     df_features["VolChange"] = df_features["Volume"].pct_change()
-
-    feature_cols = [
-        "Close", "Volume", "LogReturn", "LogReturn_Lag1", "LogReturn_Lag2",
-        "LogReturn_Lag3", "ATR_14", "RSI_14", "MACD", "VolChange"
-    ]
-
+    
+    # Select exact features in exact order
+    feature_cols = ['Close', 'Volume', 'LogReturn', 'LogReturn_Lag1', 'LogReturn_Lag2', 'LogReturn_Lag3',
+                    'ATR_14', 'RSI_14', 'MACD', 'VolChange']
+    
     df_features = df_features[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
-
+    
+    if len(df_features) < timesteps:
+        raise ValueError(
+            f"Setelah menghitung indikator, data tersisa {len(df_features)} bar. "
+            f"Butuh minimal {timesteps} bar. Gunakan start date lebih awal (minimal 1 tahun data)."
+        )
+    
+    # Get last window
     window = df_features.tail(timesteps).values
-
-    mins = window.min(axis=0)
-    maxs = window.max(axis=0)
-    window_scaled = (window - mins) / (maxs - mins + 1e-9)
-    window_scaled = np.nan_to_num(window_scaled)
-
+    
+    # Min-Max scaling per feature
+    feature_mins = window.min(axis=0)
+    feature_maxs = window.max(axis=0)
+    window_scaled = (window - feature_mins) / (feature_maxs - feature_mins + 1e-9)
+    
+    # Replace any remaining nan/inf with 0
+    window_scaled = np.nan_to_num(window_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Check if model expects correct number of features
+    if n_features != 10:
+        raise ValueError(
+            f"Model butuh n_features={n_features}, tapi builder menyiapkan 10 fitur. "
+            f"Model input shape: {inp}"
+        )
+    
     X = window_scaled.reshape(1, timesteps, 10).astype(np.float32)
     if channels == 1:
-        X = X[..., np.newaxis]
+        X = X[..., np.newaxis]  # (1, timesteps, 10, 1)
 
     return X
-
-# =========================
-# (REST OF YOUR CODE IS UNCHANGED)
-# =========================
-
 
 # =========================
 # Forecast helpers
